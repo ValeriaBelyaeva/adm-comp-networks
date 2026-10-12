@@ -1,52 +1,62 @@
-# ЛР 3. HA Postgres Cluster
+# ЛР 3. Ansible + Caddy (файл задания lab02.pdf)
 
-**Задача:** развернуть высокодоступный кластер Postgres: Patroni + Zookeeper + HAProxy.
+**Задача:** установить Ansible и с его помощью развернуть веб-сервер Caddy.
 
 ## Состав
 | Файл | Что это |
 |---|---|
-| `Dockerfile` | Образ Postgres 15 + Patroni |
-| `docker-compose.yml` | Две ноды (`pg-master`, `pg-slave`), Zookeeper, HAProxy |
-| `postgres0.yml`, `postgres1.yml` | Конфиги Patroni для двух нод |
-| `haproxy.cfg` | Точка входа: трафик идёт на текущего лидера |
+| `ansible.cfg`, `inventory/hosts` | Базовый конфиг и хосты |
+| `file_playbook.yml` | Задание 1: создание → проверка → изменение → удаление файла |
+| `caddy_deploy.yml` + `roles/caddy_deploy/` | Роль: установка Caddy, своя страница, шаблон Caddyfile |
 
 ## Ход работы
 
-### Часть 1. Поднимаем Postgres
+### Часть 1. Ansible
 ```bash
-docker compose up -d --build
-docker compose logs -f zoo pg-master pg-slave
+curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && python3 get-pip.py
+python3 -m pip install ansible
+ansible my_servers -m ping -c local
+ansible my_servers -m setup -c local
 ```
-Zookeeper запустился, одна из нод стала лидером (не обязательно `pg-master`).
-![](screenshots/01-leader.png)
+![](screenshots/01-ping.png)
 
-### Часть 2. Репликация
-1. Подключаемся к обеим нодам: `localhost:5433` и `localhost:5434`, `postgres` / `postgres`.
-2. На лидере создаём таблицу и данные:
-   ```sql
-   CREATE TABLE cars (id serial PRIMARY KEY, plate text, brand text);
-   INSERT INTO cars (plate, brand) VALUES ('А001АА', 'Hyundai'), ('В002ВВ', 'Kia');
-   ```
-3. На реплике та же таблица и данные появились автоматически.
-   ![](screenshots/02-replication.png)
-4. Запись на реплике — ошибка `cannot execute INSERT in a read-only transaction`.
-   ![](screenshots/03-readonly.png)
+Ad-hoc команды:
+```bash
+ansible my_servers -c local -m shell -a 'echo test_file_content > $HOME/test.txt'
+ansible my_servers -c local -m file -a 'path=$HOME/test.txt state=absent'
+```
+![](screenshots/02-adhoc.png)
 
-### Часть 3. HAProxy
-Подключаемся через `localhost:5432` (контейнер `postgres_entrypoint`) — попадаем на лидера. Статистика: `http://localhost:7000`.
-![](screenshots/04-haproxy.png)
+### Часть 2. Установка Caddy
+Роль создана через `ansible-galaxy init caddy_deploy`, шаги — в `roles/caddy_deploy/tasks/main.yml`.
+```bash
+ansible-playbook caddy_deploy.yml
+systemctl status caddy
+```
+![](screenshots/03-caddy-install.png)
+
+### Часть 3. Домен и Caddyfile
+1. Регистрируем домен на duckdns.org на IP сервера, прописываем его в `roles/caddy_deploy/vars/main.yml` (`domain_name`).
+2. Caddyfile генерируется из шаблона `templates/Caddyfile.j2`, после чего сервис перезагружается.
+3. Открываем домен в браузере — страница отдаётся по HTTPS с сертификатом Let's Encrypt.
+   ![](screenshots/04-https.png)
 
 ## Задание
-> Выбрать один вариант и описать здесь.
 
-**Вариант 1 — отказ мастера.** `docker stop <лидер>` → ждём ~30 с (ttl) → в логах вторая нода становится лидером, HAProxy переключается. Проверяем чтение и запись через `localhost:5432`. Описать, что произошло, со скриншотами.
+### 1. Ad-hoc → плейбук
+`file_playbook.yml`: создаёт файл, выводит содержимое, **меняет содержимое**, выводит снова, удаляет.
+```bash
+ansible-playbook file_playbook.yml
+```
+![](screenshots/05-file-playbook.png)
 
-## Ответы на вопросы
+### 2a. Расширение конфига Caddy
+- Своя страница `index.html` (Hello world) кладётся в `/var/www/html` отдельными шагами роли, `root` в шаблоне берётся из переменной `site_root`.
+- Добавлен блок `header`: свой заголовок `X-Team`, защитные `X-Content-Type-Options`, `X-Frame-Options`, убран `Server`.
 
-**Чем `expose` отличается от `ports`?**
-`expose` открывает порт только внутри docker-сети — к нему могут обращаться другие контейнеры (HAProxy ходит на `:8008` за health-check), но с хоста он недоступен. `ports` публикует порт на хост (`5433:5432`), и к нему можно подключиться снаружи. Порт из `ports` автоматически становится и exposed.
-
-**Пересоберётся ли образ при перезапуске проекта?**
-- Обычный `docker compose up` / `restart` — **нет**, используется уже собранный образ `localhost/postgres:patroni`.
-- Изменили `postgres0.yml` / `postgres1.yml` — **тоже нет**: файлы копируются в образ на этапе сборки (`COPY`), а compose сам не следит за изменениями контекста. Нужен `docker compose up --build` (или `build`).
-- Изменили `Dockerfile` — **тоже нет** без `--build`. С `--build` Docker пересоберёт образ и использует кэш слоёв: слои до первой изменённой инструкции возьмутся из кэша, остальные соберутся заново.
+Проверка:
+```bash
+curl -I https://<домен>
+```
+![](screenshots/06-hello-world.png)
+![](screenshots/07-headers.png)

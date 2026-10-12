@@ -1,62 +1,52 @@
-# ЛР 1. Loki + Zabbix + Grafana
+# ЛР 1. HA Postgres Cluster (файл задания lab03.pdf)
 
-**Задача:** подключить к тестовому сервису Nextcloud мониторинг и логирование, визуализировать в Grafana.
+**Задача:** развернуть высокодоступный кластер Postgres: Patroni + Zookeeper + HAProxy.
 
 ## Состав
 | Файл | Что это |
 |---|---|
-| `docker-compose.yml` | Nextcloud, Loki, Promtail, Grafana, Zabbix (server + web) и Postgres для Zabbix |
-| `promtail_config.yml` | Promtail читает `nextcloud.log` и отправляет в Loki |
-| `zabbix_template.yml` | Шаблон Zabbix: HTTP-проверка `status.php` Nextcloud + триггер на maintenance mode |
+| `Dockerfile` | Образ Postgres 15 + Patroni |
+| `docker-compose.yml` | Две ноды (`pg-master`, `pg-slave`), Zookeeper, HAProxy |
+| `postgres0.yml`, `postgres1.yml` | Конфиги Patroni для двух нод |
+| `haproxy.cfg` | Точка входа: трафик идёт на текущего лидера |
 
 ## Ход работы
 
-### Часть 1. Логирование
-1. `docker compose up -d`, проверяем `docker compose ps` — все контейнеры `running`.
-   ![](screenshots/01-compose-ps.png)
-2. Заходим в Nextcloud (`http://localhost:8080`), создаём учётку. Логи пишутся в `/var/www/html/data/nextcloud.log`.
-   ![](screenshots/02-nextcloud.png)
-3. `docker logs promtail` — есть строка `msg=Seeked /opt/nc_data/nextcloud.log`, значит Promtail подхватил файл.
-   ![](screenshots/03-promtail.png)
+### Часть 1. Поднимаем Postgres
+```bash
+docker compose up -d --build
+docker compose logs -f zoo pg-master pg-slave
+```
+Zookeeper запустился, одна из нод стала лидером (не обязательно `pg-master`).
+![](screenshots/01-leader.png)
 
-### Часть 2. Мониторинг
-1. Zabbix: `http://localhost:8082`, логин `Admin` / `zabbix`.
-2. *Data collection → Templates → Import* — импортируем `zabbix_template.yml`.
-3. Разрешаем имя `nextcloud` внутри docker-сети:
-   ```bash
-   docker exec -u www-data -it nextcloud php occ config:system:set trusted_domains 1 --value="nextcloud"
+### Часть 2. Репликация
+1. Подключаемся к обеим нодам: `localhost:5433` и `localhost:5434`, `postgres` / `postgres`.
+2. На лидере создаём таблицу и данные:
+   ```sql
+   CREATE TABLE cars (id serial PRIMARY KEY, plate text, brand text);
+   INSERT INTO cars (plate, brand) VALUES ('А001АА', 'Hyundai'), ('В002ВВ', 'Kia');
    ```
-4. *Data collection → Hosts → Create host*: имя `nextcloud`, группа Applications, шаблон *Test ping template*.
-5. *Monitoring → Latest data* — значение `healthy`.
-   ![](screenshots/04-zabbix-latest.png)
-6. Проверка триггера: `php occ maintenance:mode --on` → в *Monitoring → Problems* появилась проблема; `--off` → проблема решена.
-   ![](screenshots/05-zabbix-problem.png)
+3. На реплике та же таблица и данные появились автоматически.
+   ![](screenshots/02-replication.png)
+4. Запись на реплике — ошибка `cannot execute INSERT in a read-only transaction`.
+   ![](screenshots/03-readonly.png)
 
-### Часть 3. Визуализация
-1. Плагин Zabbix для Grafana:
-   ```bash
-   docker exec -it grafana bash -c "grafana cli plugins install alexanderzobnin-zabbix-app"
-   docker restart grafana
-   ```
-   *Administration → Plugins → Zabbix → Enable*.
-2. Data source Loki: URL `http://loki:3100` → *Save & test*.
-3. Data source Zabbix: URL `http://zabbix-front:8080/api_jsonrpc.php`, `Admin` / `zabbix` → *Save & test*.
-   ![](screenshots/06-datasources.png)
-4. *Explore*: Loki — `{job="nextcloud_logs"}`, Zabbix — группа Applications, хост nextcloud, item ping.
+### Часть 3. HAProxy
+Подключаемся через `localhost:5432` (контейнер `postgres_entrypoint`) — попадаем на лидера. Статистика: `http://localhost:7000`.
+![](screenshots/04-haproxy.png)
 
-## Задание: дашборды
-1. **Zabbix** — панель *Stat*, значение `Nextcloud: ping service`, value mapping `healthy` → зелёный, `unhealthy` → красный.
-   ![](screenshots/07-dashboard-zabbix.png)
-2. **Loki** — панель *Logs* / *Table*, запрос `{job="nextcloud_logs"}`.
-   ![](screenshots/08-dashboard-loki.png)
+## Задание
+> Выбрать один вариант и описать здесь.
+
+**Вариант 1 — отказ мастера.** `docker stop <лидер>` → ждём ~30 с (ttl) → в логах вторая нода становится лидером, HAProxy переключается. Проверяем чтение и запись через `localhost:5432`. Описать, что произошло, со скриншотами.
 
 ## Ответы на вопросы
 
-**Чем SLO отличается от SLA?**
-SLA (Service Level Agreement) — внешнее соглашение с клиентом о качестве сервиса с последствиями за нарушение (штрафы, компенсации), например «доступность 99,9 % в месяц». SLO (Service Level Objective) — внутренняя целевая планка команды по конкретной метрике (SLI), обычно строже SLA, чтобы был запас: например, SLO 99,95 % при SLA 99,9 %. Нарушение SLO — сигнал команде, нарушение SLA — юридические и денежные последствия.
+**Чем `expose` отличается от `ports`?**
+`expose` открывает порт только внутри docker-сети — к нему могут обращаться другие контейнеры (HAProxy ходит на `:8008` за health-check), но с хоста он недоступен. `ports` публикует порт на хост (`5433:5432`), и к нему можно подключиться снаружи. Порт из `ports` автоматически становится и exposed.
 
-**Чем инкрементальный бэкап отличается от дифференциального?**
-Оба делаются поверх полного бэкапа. Инкрементальный сохраняет изменения с момента *предыдущего бэкапа любого типа* — каждый маленький и быстрый, но для восстановления нужен полный + вся цепочка инкрементов. Дифференциальный сохраняет изменения с момента *последнего полного* — каждый следующий больше предыдущего, зато для восстановления нужны только полный + последний дифференциальный.
-
-**В чём разница между мониторингом и observability?**
-Мониторинг отвечает на заранее известные вопросы: собираем выбранные метрики и проверки, ставим пороги и алерты («сервис жив?», «CPU > 90 %?»). Observability — свойство системы, позволяющее по её внешним данным (метрики, логи, трейсы) понять внутреннее состояние и ответить на *новые*, заранее не предусмотренные вопросы («почему у части пользователей медленно?»). Мониторинг — часть observability. В этой лабе Zabbix даёт мониторинг, а связка с логами в Loki — шаг к observability.
+**Пересоберётся ли образ при перезапуске проекта?**
+- Обычный `docker compose up` / `restart` — **нет**, используется уже собранный образ `localhost/postgres:patroni`.
+- Изменили `postgres0.yml` / `postgres1.yml` — **тоже нет**: файлы копируются в образ на этапе сборки (`COPY`), а compose сам не следит за изменениями контекста. Нужен `docker compose up --build` (или `build`).
+- Изменили `Dockerfile` — **тоже нет** без `--build`. С `--build` Docker пересоберёт образ и использует кэш слоёв: слои до первой изменённой инструкции возьмутся из кэша, остальные соберутся заново.

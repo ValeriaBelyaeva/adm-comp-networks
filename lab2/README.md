@@ -1,62 +1,62 @@
-# ЛР 2. Ansible + Caddy
+# ЛР 2. Loki + Zabbix + Grafana (файл задания lab1.pdf)
 
-**Задача:** установить Ansible и с его помощью развернуть веб-сервер Caddy.
+**Задача:** подключить к тестовому сервису Nextcloud мониторинг и логирование, визуализировать в Grafana.
 
 ## Состав
 | Файл | Что это |
 |---|---|
-| `ansible.cfg`, `inventory/hosts` | Базовый конфиг и хосты |
-| `file_playbook.yml` | Задание 1: создание → проверка → изменение → удаление файла |
-| `caddy_deploy.yml` + `roles/caddy_deploy/` | Роль: установка Caddy, своя страница, шаблон Caddyfile |
+| `docker-compose.yml` | Nextcloud, Loki, Promtail, Grafana, Zabbix (server + web) и Postgres для Zabbix |
+| `promtail_config.yml` | Promtail читает `nextcloud.log` и отправляет в Loki |
+| `zabbix_template.yml` | Шаблон Zabbix: HTTP-проверка `status.php` Nextcloud + триггер на maintenance mode |
 
 ## Ход работы
 
-### Часть 1. Ansible
-```bash
-curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && python3 get-pip.py
-python3 -m pip install ansible
-ansible my_servers -m ping -c local
-ansible my_servers -m setup -c local
-```
-![](screenshots/01-ping.png)
+### Часть 1. Логирование
+1. `docker compose up -d`, проверяем `docker compose ps` — все контейнеры `running`.
+   ![](screenshots/01-compose-ps.png)
+2. Заходим в Nextcloud (`http://localhost:8080`), создаём учётку. Логи пишутся в `/var/www/html/data/nextcloud.log`.
+   ![](screenshots/02-nextcloud.png)
+3. `docker logs promtail` — есть строка `msg=Seeked /opt/nc_data/nextcloud.log`, значит Promtail подхватил файл.
+   ![](screenshots/03-promtail.png)
 
-Ad-hoc команды:
-```bash
-ansible my_servers -c local -m shell -a 'echo test_file_content > $HOME/test.txt'
-ansible my_servers -c local -m file -a 'path=$HOME/test.txt state=absent'
-```
-![](screenshots/02-adhoc.png)
+### Часть 2. Мониторинг
+1. Zabbix: `http://localhost:8082`, логин `Admin` / `zabbix`.
+2. *Data collection → Templates → Import* — импортируем `zabbix_template.yml`.
+3. Разрешаем имя `nextcloud` внутри docker-сети:
+   ```bash
+   docker exec -u www-data -it nextcloud php occ config:system:set trusted_domains 1 --value="nextcloud"
+   ```
+4. *Data collection → Hosts → Create host*: имя `nextcloud`, группа Applications, шаблон *Test ping template*.
+5. *Monitoring → Latest data* — значение `healthy`.
+   ![](screenshots/04-zabbix-latest.png)
+6. Проверка триггера: `php occ maintenance:mode --on` → в *Monitoring → Problems* появилась проблема; `--off` → проблема решена.
+   ![](screenshots/05-zabbix-problem.png)
 
-### Часть 2. Установка Caddy
-Роль создана через `ansible-galaxy init caddy_deploy`, шаги — в `roles/caddy_deploy/tasks/main.yml`.
-```bash
-ansible-playbook caddy_deploy.yml
-systemctl status caddy
-```
-![](screenshots/03-caddy-install.png)
+### Часть 3. Визуализация
+1. Плагин Zabbix для Grafana:
+   ```bash
+   docker exec -it grafana bash -c "grafana cli plugins install alexanderzobnin-zabbix-app"
+   docker restart grafana
+   ```
+   *Administration → Plugins → Zabbix → Enable*.
+2. Data source Loki: URL `http://loki:3100` → *Save & test*.
+3. Data source Zabbix: URL `http://zabbix-front:8080/api_jsonrpc.php`, `Admin` / `zabbix` → *Save & test*.
+   ![](screenshots/06-datasources.png)
+4. *Explore*: Loki — `{job="nextcloud_logs"}`, Zabbix — группа Applications, хост nextcloud, item ping.
 
-### Часть 3. Домен и Caddyfile
-1. Регистрируем домен на duckdns.org на IP сервера, прописываем его в `roles/caddy_deploy/vars/main.yml` (`domain_name`).
-2. Caddyfile генерируется из шаблона `templates/Caddyfile.j2`, после чего сервис перезагружается.
-3. Открываем домен в браузере — страница отдаётся по HTTPS с сертификатом Let's Encrypt.
-   ![](screenshots/04-https.png)
+## Задание: дашборды
+1. **Zabbix** — панель *Stat*, значение `Nextcloud: ping service`, value mapping `healthy` → зелёный, `unhealthy` → красный.
+   ![](screenshots/07-dashboard-zabbix.png)
+2. **Loki** — панель *Logs* / *Table*, запрос `{job="nextcloud_logs"}`.
+   ![](screenshots/08-dashboard-loki.png)
 
-## Задание
+## Ответы на вопросы
 
-### 1. Ad-hoc → плейбук
-`file_playbook.yml`: создаёт файл, выводит содержимое, **меняет содержимое**, выводит снова, удаляет.
-```bash
-ansible-playbook file_playbook.yml
-```
-![](screenshots/05-file-playbook.png)
+**Чем SLO отличается от SLA?**
+SLA (Service Level Agreement) — внешнее соглашение с клиентом о качестве сервиса с последствиями за нарушение (штрафы, компенсации), например «доступность 99,9 % в месяц». SLO (Service Level Objective) — внутренняя целевая планка команды по конкретной метрике (SLI), обычно строже SLA, чтобы был запас: например, SLO 99,95 % при SLA 99,9 %. Нарушение SLO — сигнал команде, нарушение SLA — юридические и денежные последствия.
 
-### 2a. Расширение конфига Caddy
-- Своя страница `index.html` (Hello world) кладётся в `/var/www/html` отдельными шагами роли, `root` в шаблоне берётся из переменной `site_root`.
-- Добавлен блок `header`: свой заголовок `X-Team`, защитные `X-Content-Type-Options`, `X-Frame-Options`, убран `Server`.
+**Чем инкрементальный бэкап отличается от дифференциального?**
+Оба делаются поверх полного бэкапа. Инкрементальный сохраняет изменения с момента *предыдущего бэкапа любого типа* — каждый маленький и быстрый, но для восстановления нужен полный + вся цепочка инкрементов. Дифференциальный сохраняет изменения с момента *последнего полного* — каждый следующий больше предыдущего, зато для восстановления нужны только полный + последний дифференциальный.
 
-Проверка:
-```bash
-curl -I https://<домен>
-```
-![](screenshots/06-hello-world.png)
-![](screenshots/07-headers.png)
+**В чём разница между мониторингом и observability?**
+Мониторинг отвечает на заранее известные вопросы: собираем выбранные метрики и проверки, ставим пороги и алерты («сервис жив?», «CPU > 90 %?»). Observability — свойство системы, позволяющее по её внешним данным (метрики, логи, трейсы) понять внутреннее состояние и ответить на *новые*, заранее не предусмотренные вопросы («почему у части пользователей медленно?»). Мониторинг — часть observability. В этой лабе Zabbix даёт мониторинг, а связка с логами в Loki — шаг к observability.

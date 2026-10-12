@@ -1,80 +1,64 @@
 services:
-  nextcloud:
-    image: nextcloud:29.0.6
-    container_name: nextcloud # на это имя завязана настройка Zabbix
-    ports:
-      - "8080:80"
-    volumes:
-      - nc-data:/var/www/html/data
-
-  loki: # обработчик логов
-    image: grafana/loki:2.9.0
-    container_name: loki
-    ports:
-      - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
-
-  promtail: # сборщик логов
-    image: grafana/promtail:2.9.0
-    container_name: promtail
-    volumes:
-      - nc-data:/opt/nc_data # та же директория, что монтируется в Nextcloud
-      - ./promtail_config.yml:/etc/promtail/config.yml
-    command: -config.file=/etc/promtail/config.yml
-
-  grafana: # визуализация
-    image: grafana/grafana:11.2.0
-    container_name: grafana
+  pg-master:
+    build: .
+    image: localhost/postgres:patroni
+    container_name: pg-master
+    restart: always
+    hostname: pg-master
     environment:
-      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-    command: /run.sh
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGDATA: '/var/lib/postgresql/data/pgdata'
+    expose:
+      - 8008
     ports:
-      - "3000:3000"
-
-  postgres-zabbix:
-    image: postgres:15
-    container_name: postgres-zabbix
-    environment:
-      POSTGRES_USER: zabbix
-      POSTGRES_PASSWORD: zabbix
-      POSTGRES_DB: zabbix
+      - 5433:5432
     volumes:
-      - zabbix-db:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "zabbix"]
-      interval: 10s
-      retries: 5
-      start_period: 5s
+      - pg-master:/var/lib/postgresql/data
+    command: patroni /postgres0.yml
 
-  zabbix-server: # бэкенд Zabbix
-    image: zabbix/zabbix-server-pgsql:ubuntu-6.4-latest
-    container_name: zabbix-back
+  pg-slave:
+    build: .
+    image: localhost/postgres:patroni
+    container_name: pg-slave
+    restart: always
+    hostname: pg-slave
+    expose:
+      - 8008
     ports:
-      - "10051:10051"
+      - 5434:5432
+    volumes:
+      - pg-slave:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGDATA: '/var/lib/postgresql/data/pgdata'
+    command: patroni /postgres1.yml
+
+  zoo:
+    image: confluentinc/cp-zookeeper:7.7.1
+    container_name: zoo
+    restart: always
+    hostname: zoo
+    ports:
+      - 2181:2181
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  haproxy:
+    image: haproxy:3.0
+    container_name: postgres_entrypoint
+    ports:
+      - 5432:5432 # точка входа в БД
+      - 7000:7000 # страница статистики
     depends_on:
-      - postgres-zabbix
-    environment:
-      POSTGRES_USER: zabbix
-      POSTGRES_PASSWORD: zabbix
-      POSTGRES_DB: zabbix
-      DB_SERVER_HOST: postgres-zabbix
-
-  zabbix-web-nginx-pgsql: # фронтенд Zabbix
-    image: zabbix/zabbix-web-nginx-pgsql:ubuntu-6.4-latest
-    container_name: zabbix-front
-    ports:
-      - "8082:8080"
-    depends_on:
-      - postgres-zabbix
-    environment:
-      POSTGRES_USER: zabbix
-      POSTGRES_PASSWORD: zabbix
-      POSTGRES_DB: zabbix
-      DB_SERVER_HOST: postgres-zabbix
-      ZBX_SERVER_HOST: zabbix-back
+      - pg-master
+      - pg-slave
+      - zoo
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg
 
 volumes:
-  nc-data:
-  zabbix-db:
+  pg-master:
+  pg-slave:
