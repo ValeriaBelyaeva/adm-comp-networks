@@ -1,0 +1,8 @@
+---
+# vars file for caddy_deploy
+domain_name: CHANGE_ME.duckdns.org # свой домен с duckdns.org
+site_root: /var/www/html
+team_name: adm-comp-networks
+log:
+  file: /var/log/caddy_access.log
+  level: "INFO"

@@ -1,0 +1,7 @@
+---
+- name: Install and configure Caddy webserver
+  hosts: my_servers
+  connection: local # для 2b убрать и поменять hosts на remote
+  become: true
+  roles:
+    - caddy_deploy

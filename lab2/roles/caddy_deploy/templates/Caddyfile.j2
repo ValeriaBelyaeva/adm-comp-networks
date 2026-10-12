@@ -1,0 +1,18 @@
+{{ domain_name }} {
+	root * {{ site_root }}
+	file_server
+
+	# Задание 2a: дополнительные заголовки
+	header {
+		X-Team "{{ team_name }}"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	log {
+		output file {{ log.file }}
+		format json
+		level {{ log.level }}
+	}
+}

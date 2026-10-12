@@ -1,0 +1,41 @@
+---
+# Задание 1: ad-hoc пример из Части 1 в виде плейбука + шаг изменения содержимого
+- name: Create, check, change and delete a test file
+  hosts: my_servers
+  connection: local
+  vars:
+    test_file: "{{ ansible_env.HOME }}/test.txt"
+
+  tasks:
+    - name: 1. Create file with content
+      ansible.builtin.copy:
+        dest: "{{ test_file }}"
+        content: "test_file_content\n"
+
+    - name: 2. Read file
+      ansible.builtin.command: cat {{ test_file }}
+      register: before
+      changed_when: false
+
+    - name: 2. Show content
+      ansible.builtin.debug:
+        msg: "{{ before.stdout }}"
+
+    - name: 3. Change content before deletion
+      ansible.builtin.copy:
+        dest: "{{ test_file }}"
+        content: "changed_content\n"
+
+    - name: 3. Read changed file
+      ansible.builtin.command: cat {{ test_file }}
+      register: after
+      changed_when: false
+
+    - name: 3. Show changed content
+      ansible.builtin.debug:
+        msg: "{{ after.stdout }}"
+
+    - name: 4. Delete file
+      ansible.builtin.file:
+        path: "{{ test_file }}"
+        state: absent

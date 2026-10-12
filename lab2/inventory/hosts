@@ -1,0 +1,6 @@
+[my_servers]
+local_server  ansible_host=localhost
+
+# Для варианта 2b (удалённый сервер) — раскомментировать и подставить свою ВМ:
+# [remote]
+# vm  ansible_host=<IP_ВМ>  ansible_user=root  ansible_ssh_private_key_file=~/.ssh/id_ed25519
